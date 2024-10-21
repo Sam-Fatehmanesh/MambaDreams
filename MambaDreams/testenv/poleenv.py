@@ -81,7 +81,7 @@ class PoleEnv:
         if self.simulation_thread:
             self.simulation_thread.join()
 
-    def sample_buffer(self, batch_size):
+    def sample_buffer(self, batch_size, seq_length):
         self.pause_generation.clear()  # Pause the simulator
         list_data_buffer = list(self.data_buffer.queue)
         self.pause_generation.set()
@@ -96,16 +96,22 @@ class PoleEnv:
             episode = random.choice(list_data_buffer)
             episode_obs, episode_actions, episode_rewards = episode
 
-            if len(episode_obs) < 1:
-                continue  # Skip episodes that are too short
+            if len(episode_obs) < seq_length:
+                continue 
 
-            idx = random.randint(0, len(episode_obs) - 1)
+            start_idx = random.randint(0, len(episode_obs) - seq_length)
+            end_idx = start_idx + seq_length
 
-            obs_batch.append(episode_obs[idx])
-            action_batch.append(episode_actions[idx])
-            reward_batch.append(episode_rewards[idx])
+            obs_batch.append(episode_obs[start_idx:end_idx])
+            action_batch.append(episode_actions[start_idx:end_idx])
+            reward_batch.append(episode_rewards[start_idx:end_idx])
+
+        # if len(obs_batch) < batch_size:
+        #     print(f"Warning: Could only generate {len(obs_batch)} sequences instead of {batch_size}")
 
         return np.array(obs_batch), np.array(action_batch), np.array(reward_batch)
+
+
 
     def get_latest_episode(self):
         return self.get_episode_with_index(self.data_buffer.qsize() - 1)

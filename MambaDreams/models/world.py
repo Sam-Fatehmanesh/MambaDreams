@@ -2,17 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from NeuroControl.models.cnn import CNNLayer, DeCNNLayer
-from NeuroControl.models.mlp import MLP
-from NeuroControl.models.critic import NeuralControlCritic
-from NeuroControl.models.dynamics_predictor import  NeuralRepModel, NeuralSeqModel
-from NeuroControl.models.autoencoder import NeuralAutoEncoder
+from MambaDreams.models.mambacore import StackedMamba
+from MambaDreams.models.vae import VariationalAutoEncoder
+from MambaDreams.custom_functions.utils import STMNsampler
 import pdb
 import csv
-from soft_moe_pytorch import SoftMoE, DynamicSlotsSoftMoE
 from mamba_ssm import Mamba2 as Mamba
-from NeuroControl.custom_functions.utils import STMNsampler, symlog, symexp
-from NeuroControl.custom_functions.utils import logits_to_reward
+import math
+
 
 
 
@@ -88,6 +85,119 @@ from NeuroControl.custom_functions.utils import logits_to_reward
 
 #         return hidden_state, pred_obs_lat_sample, predicted_reward
 
+
+def least_power_of_2(value):
+    if value <= 0:
+        return 1
     
-# class WorldMambaModel(nn.Module):
-#     def __init__(self, action_dims, )
+    exponent = math.ceil(math.log(value, 2))
+    return 2 ** exponent
+
+class LastTokenSelector(nn.Module):
+    def forward(self, x):
+        return x[:, -1, :]
+
+class AddUniformBase(nn.Module):
+    def forward(self, x):
+        return (0.99 * x) + (0.01*(1.0/x.shape[-1]))
+    
+class WorldModel(nn.Module):
+    def __init__(self, action_dims, image_side_size, image_latent_category_size):
+        super(WorldModel, self).__init__()
+
+        self.action_dims = action_dims
+        self.action_size = np.prod(action_dims)
+        self.image_latent_category_size = image_latent_category_size
+        self.image_latent_size = image_latent_category_size**2
+        self.reward_size = 1
+        self.image_side_size = image_side_size
+
+        self.raw_hidden_size = self.image_latent_size + self.action_size + self.reward_size
+
+        self.hidden_size = least_power_of_2(self.raw_hidden_size)
+
+        self.state_pad_size = self.hidden_size - self.raw_hidden_size
+        
+        self.vae = VariationalAutoEncoder(image_side_size, image_latent_category_size)
+
+        self.predictor = StackedMamba(self.hidden_size, 8)
+
+        self.image_predict_last_dist = nn.Sequential(
+            Mamba(self.hidden_size),
+            nn.Linear(self.hidden_size, self.image_latent_size),
+            nn.Unflatten(-1, (self.image_latent_category_size, self.image_latent_category_size)),
+            nn.Softmax(dim=-1),
+            AddUniformBase(),
+            nn.Flatten(start_dim=2),
+        )
+
+        self.reward_predictor = nn.Sequential(
+            Mamba(self.hidden_size),
+            nn.Linear(self.hidden_size, self.reward_size),
+        )
+
+        self.image_lat_sampler = STMNsampler()
+
+
+    def encode_obs(self, obs):
+        batch_size = obs.shape[0]
+        seq_length = obs.shape[1]
+
+        obs = obs.reshape(batch_size*seq_length, 1, self.image_side_size, self.image_side_size)
+        decoded_obs, latent_samples, latent_distribution = self.vae(obs)
+
+        latent_samples = latent_samples.view(batch_size, seq_length, self.image_latent_size)
+        latent_distribution = latent_distribution.view(batch_size, seq_length, self.image_latent_size)
+        decoded_obs = decoded_obs.view(batch_size, seq_length, self.image_side_size, self.image_side_size)
+
+
+        return decoded_obs, latent_samples, latent_distribution
+
+
+
+
+    def forward(self, obs_lats, actions, rewards):
+        batch_size = obs_lats.shape[0]
+        seq_length = obs_lats.shape[1]
+
+
+        latent_samples = obs_lats.view(batch_size, seq_length, self.image_latent_size)
+        #latent_distribution = latent_distribution.view(batch_size, seq_length, *latent_distribution.shape[1:])
+
+        actions = torch.unsqueeze(actions, dim=-1)
+        states = torch.cat([latent_samples, actions, rewards], dim=-1)
+        # pads states
+        states = torch.cat([states, torch.zeros(batch_size, seq_length, self.state_pad_size+1).to(states.device)], dim=-1)
+
+        hidden_state = self.predictor(states)
+
+        # takes last token
+        predicted_image_lat_dists = self.image_predict_last_dist(hidden_state)
+
+        predicted_next_image_lat_samples = self.image_lat_sampler(predicted_image_lat_dists.view(batch_size*seq_length*self.image_latent_category_size, self.image_latent_category_size)).view(batch_size, seq_length, self.image_latent_size)
+
+        predicted_next_decoded_obs = self.vae.decode(predicted_next_image_lat_samples.view(batch_size*seq_length, self.image_latent_size)).view(batch_size, seq_length, self.image_side_size, self.image_side_size)
+        
+        predicted_rewards = self.reward_predictor(hidden_state)
+
+        return predicted_next_decoded_obs, predicted_image_lat_dists, predicted_rewards, hidden_state
+
+
+
+    def sample_obs_from_lat_dist(self, lat_dist):
+        batch_size = lat_dist.shape[0]
+        seq_length = lat_dist.shape[1]
+
+        image_lat_samples = self.image_lat_sampler(lat_dist.view(batch_size*seq_length*self.image_latent_category_size, self.image_latent_category_size)).view(batch_size, seq_length, self.image_latent_size)
+
+
+        return self.vae.decode(image_lat_samples.view(batch_size*seq_length, self.image_latent_size)).view(batch_size, seq_length, self.image_side_size, self.image_side_size)
+
+
+
+
+
+
+
+
+
