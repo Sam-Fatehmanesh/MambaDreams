@@ -5,6 +5,7 @@ import numpy as np
 from MambaDreams.models.mambacore import StackedMamba
 from MambaDreams.models.vae import VariationalAutoEncoder
 from MambaDreams.custom_functions.utils import STMNsampler
+from MambaDreams.models.mlp import MLP
 import pdb
 import csv
 from mamba_ssm import Mamba2 as Mamba
@@ -120,7 +121,7 @@ class WorldModel(nn.Module):
         
         self.vae = VariationalAutoEncoder(image_side_size, image_latent_category_size)
 
-        self.predictor = StackedMamba(self.hidden_size, 8)
+        self.predictor = StackedMamba(self.hidden_size, 2)
 
         self.image_predict_last_dist = nn.Sequential(
             Mamba(self.hidden_size),
@@ -134,6 +135,11 @@ class WorldModel(nn.Module):
         self.reward_predictor = nn.Sequential(
             Mamba(self.hidden_size),
             nn.Linear(self.hidden_size, self.reward_size),
+        )
+
+        self.continue_predictor = nn.Sequential(
+            MLP(1, self.hidden_size, self.hidden_size, 1),
+            nn.Sigmoid(),
         )
 
         self.image_lat_sampler = STMNsampler()
@@ -167,7 +173,7 @@ class WorldModel(nn.Module):
         actions = torch.unsqueeze(actions, dim=-1)
         states = torch.cat([latent_samples, actions, rewards], dim=-1)
         # pads states
-        states = torch.cat([states, torch.zeros(batch_size, seq_length, self.state_pad_size+1).to(states.device)], dim=-1)
+        states = torch.cat([states, torch.zeros(batch_size, seq_length, self.state_pad_size + 1).to(states.device)], dim=-1)
 
         hidden_state = self.predictor(states)
 
@@ -178,7 +184,8 @@ class WorldModel(nn.Module):
 
         predicted_next_decoded_obs = self.vae.decode(predicted_next_image_lat_samples.view(batch_size*seq_length, self.image_latent_size)).view(batch_size, seq_length, self.image_side_size, self.image_side_size)
         
-        predicted_rewards = self.reward_predictor(hidden_state)
+        continue_prediction = self.continue_predictor(hidden_state.detach())
+        predicted_rewards = self.reward_predictor(hidden_state.detach())
 
         return predicted_next_decoded_obs, predicted_image_lat_dists, predicted_rewards, hidden_state
 

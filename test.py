@@ -4,13 +4,14 @@ import torch.optim as optim
 import torch.nn.functional as F
 from MambaDreams.models.world import WorldModel
 from MambaDreams.testenv.poleenv import PoleEnv
+from MambaDreams.custom_functions.laprop import LaProp
 import numpy as np
 import os
 import time
 import matplotlib.pyplot as plt
 
 # Check if CUDA is available
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = "cuda:0"#torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Initialize environment and world model
@@ -27,14 +28,15 @@ world_model = WorldModel(
 ).to(device)
 
 # Training parameters
-num_epochs = 10000
-batch_size = 32
-seq_length = 30
+num_epochs = 2000
+batch_size = 16
+seq_length = 20
 learning_rate = 1e-3
 
 optimizer = optim.Adam(world_model.parameters(), lr=learning_rate)
 mse_loss = nn.MSELoss()
 ce_loss = nn.CrossEntropyLoss()
+# bce_loss = nn.BCELoss()
 
 # Lists to store loss values for plotting
 kl_div_losses = []
@@ -64,16 +66,19 @@ for epoch in range(num_epochs):
 
     # Calculate losses
     # Reconstruction loss
-    obs_loss = F.binary_cross_entropy(decoded_obs, obs_tensor, reduction='sum')
+    obs_loss = F.binary_cross_entropy(decoded_obs, obs_tensor, reduction='sum') 
+
     # KL loss
-    uniform_prior = 1.0 / world_model.image_latent_category_size
-    kl_divergence = torch.sum(obs_lat_dists * torch.log(obs_lat_dists / uniform_prior))
+    obs_lat_dists = obs_lat_dists[:, 1:].reshape(-1, world_model.image_latent_category_size) 
+    pred_lat_dists = pred_lat_dists.reshape(-1, world_model.image_latent_category_size)
+
+    kl_divergence =  torch.sum(obs_lat_dists * torch.log(obs_lat_dists  / pred_lat_dists)) #+ torch.sum(pred_lat_dists.detach() * torch.log( pred_lat_dists.detach() / obs_lat_dists))
 
     vae_loss = obs_loss + kl_divergence
 
     reward_loss = mse_loss(pred_rewards, reward_tensor[:, 1:])
 
-    latent_loss = mse_loss(obs_lat_dists[:, 1:], pred_lat_dists)
+    latent_loss = 10*ce_loss(pred_lat_dists, obs_lat_dists.detach())
 
     total_loss = vae_loss + reward_loss + latent_loss
 
@@ -88,8 +93,7 @@ for epoch in range(num_epochs):
     latent_losses.append(latent_loss.item())
     reward_losses.append(reward_loss.item())
 
-    #if (epoch + 1) % 10 == 0:
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss.item():.4f}")
+    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {total_loss.item():.4f}, Env steps: {env.total_steps}")
 
 # Generate videos
 def generate_video(obs_sequence, filename):

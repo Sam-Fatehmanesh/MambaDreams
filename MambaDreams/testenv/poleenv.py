@@ -31,6 +31,8 @@ class PoleEnv:
 
         self.image_side_length = 128
 
+        self.total_steps = 0
+
     def simulation_worker(self):
         while not self.stop_generation:
             self.pause_generation.wait()  # Wait if paused
@@ -54,6 +56,7 @@ class PoleEnv:
                 episode_obs.append(obs)
                 episode_actions.append(action)
                 episode_rewards.append(reward)
+                self.total_steps += 1
 
                 obs = next_obs
                 self.all_rewards.append(reward)
@@ -106,8 +109,6 @@ class PoleEnv:
             action_batch.append(episode_actions[start_idx:end_idx])
             reward_batch.append(episode_rewards[start_idx:end_idx])
 
-        # if len(obs_batch) < batch_size:
-        #     print(f"Warning: Could only generate {len(obs_batch)} sequences instead of {batch_size}")
 
         return np.array(obs_batch), np.array(action_batch), np.array(reward_batch)
 
